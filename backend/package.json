@@ -1,0 +1,22 @@
+{
+  "name": "cybershield-backend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "CyberShield REST API.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test:integration": "node scripts/verify-api.js",
+    "db:reset-demo-passwords": "node scripts/reset-demo-passwords.js",
+    "mongo:seed": "set NODE_PATH=%CD%\\node_modules&& node ../mongodb/seed.js",
+    "mongo:verify": "set NODE_PATH=%CD%\\node_modules&& node ../mongodb/verify.js"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.18.0",
+    "pg": "^8.16.3"
+  }
+}

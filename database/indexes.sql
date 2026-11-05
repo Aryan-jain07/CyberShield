@@ -1,0 +1,15 @@
+CREATE INDEX idx_asset_owner ON asset(owner_user_id);
+CREATE INDEX idx_asset_criticality_status ON asset(criticality, status);
+CREATE INDEX idx_asset_software_software ON asset_software(software_id, asset_id);
+CREATE INDEX idx_software_vuln_vuln ON software_vuln(vuln_id, software_id);
+CREATE INDEX idx_vulnerability_cvss ON vulnerability(cvss_score DESC) WHERE status = 'OPEN';
+CREATE INDEX idx_incident_status_severity_detected ON incident(status, severity, detected_at DESC);
+CREATE INDEX idx_incident_assigned_status ON incident(assigned_to, status);
+CREATE INDEX idx_incident_asset_asset ON incident_asset(asset_id, incident_id);
+CREATE INDEX idx_indicator_type_value ON indicator(type, value);
+CREATE INDEX idx_incident_indicator_indicator ON incident_indicator(indicator_id, incident_id);
+CREATE INDEX idx_actor_indicator_indicator ON actor_indicator(indicator_id, actor_id);
+CREATE INDEX idx_incident_technique_technique ON incident_technique(technique_id, incident_id);
+CREATE INDEX idx_response_action_incident_performed ON response_action(incident_id, performed_at DESC);
+CREATE INDEX idx_audit_log_entity_time ON audit_log(entity_name, entity_id, timestamp DESC);
+CREATE INDEX idx_audit_log_user_time ON audit_log(user_id, timestamp DESC);
