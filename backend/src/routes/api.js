@@ -152,6 +152,7 @@ router.get('/threat-intelligence/:indicator', authorize(...readers), asyncHandle
   console.info('[threat-intelligence lookup]', {
     database: db.databaseName,
     collection: 'threat_indicators',
+    atlasHost: new URL(process.env.MONGODB_URI).hostname,
     indicatorLength: req.params.indicator.length,
     matchCount: documents.length
   });
