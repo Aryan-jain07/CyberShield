@@ -34,3 +34,60 @@ The demo opens on a polished login page and signs into the live analyst dashboar
 ## Phase 4: analyst assistance and graph
 
 The incident investigation now includes a relationship graph driven by the live incident payload: incident to assets, indicators, MITRE techniques, MongoDB threat intelligence, and response actions. It also includes a deterministic NLP assistance panel. The `POST /api/nlp/analyze` endpoint suggests a category, severity, ATT&CK techniques, keywords, and syntactically visible indicators using explainable keyword rules; its results are explicitly advisory and must be confirmed or changed by an analyst.
+
+## Deployment configuration
+
+The target deployment uses Vercel for the frontend, Render for the backend, Neon for PostgreSQL, and MongoDB Atlas for MongoDB.
+
+### Local development
+
+1. Copy `.env.example` to `.env` without overwriting an existing `.env`.
+2. For local PostgreSQL, set `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`. Leave `DATABASE_URL` empty.
+3. Set `MONGODB_URI` and `JWT_SECRET`.
+4. Set `FRONTEND_URL=http://localhost:5173` or leave it unset; both `localhost:5173` and `127.0.0.1:5173` are allowed by default.
+5. Initialize PostgreSQL with `./database/init.ps1` and seed MongoDB from `backend` with `npm run mongo:seed`.
+6. Start the backend from `backend` with `npm start`.
+7. Start the frontend from `frontend` with `npm run dev`.
+
+The Vite development proxy sends `/api` requests to `http://localhost:4000`, so no frontend environment variable is required locally.
+
+### Render backend
+
+Create a Render Web Service with:
+
+```text
+Root directory: backend
+Build command: npm install
+Start command: npm start
+```
+
+Set these Render environment variables:
+
+```text
+DATABASE_URL=your-Neon-connection-string
+MONGODB_URI=your-MongoDB-Atlas-connection-string
+JWT_SECRET=your-long-random-secret
+FRONTEND_URL=https://your-project.vercel.app
+```
+
+Render supplies `PORT` automatically. Do not configure `POSTGRES_*` when using `DATABASE_URL`; the backend prefers `DATABASE_URL` for Neon and falls back to the local `POSTGRES_*` variables when it is absent.
+
+### Vercel frontend
+
+Create a Vercel project with:
+
+```text
+Root directory: frontend
+Build command: npm run build
+Output directory: dist
+```
+
+Set this Vercel environment variable:
+
+```text
+VITE_API_URL=https://your-backend.onrender.com/api
+```
+
+`VITE_API_URL` contains only the public API URL. Never put database credentials, `JWT_SECRET`, or `MONGODB_URI` in a `VITE_` variable because Vite exposes those variables to browser code.
+
+The backend accepts the configured Vercel origin plus the two local development origins. Do not set `FRONTEND_URL=*`; wildcard origins are rejected because the API uses credentialed CORS.
