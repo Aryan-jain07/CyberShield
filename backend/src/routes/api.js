@@ -149,21 +149,6 @@ router.get('/indicators', authorize(...readers), asyncHandler(async (_req, res) 
 }));
 router.get('/threat-intelligence/:indicator', authorize(...readers), asyncHandler(async (req, res) => {
   const db = await getMongoDb(); const documents = await db.collection('threat_indicators').find({ indicator: req.params.indicator }).project({ _id: 0 }).toArray();
-  console.info('[threat-intelligence lookup]', {
-    database: db.databaseName,
-    collection: 'threat_indicators',
-    atlasHost: new URL(process.env.MONGODB_URI).hostname,
-    indicatorReceived: JSON.stringify(req.params.indicator),
-    indicatorLength: req.params.indicator.length,
-    matchCount: documents.length,
-    collectionCount: await db.collection('threat_indicators').countDocuments({}),
-    sampleIndicator: JSON.stringify(
-      await db.collection('threat_indicators').findOne(
-        { indicator: req.params.indicator },
-        { projection: { _id: 0, indicator: 1 } }
-      )
-    )
-  });
   if (!documents.length) throw apiError(404, 'Threat intelligence not found for indicator.'); res.json(documents);
 }));
 
