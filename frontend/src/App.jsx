@@ -12,8 +12,8 @@ const severityClass = (value) => `badge ${String(value).toLowerCase()}`;
 const fmt = (value) => value ? new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—';
 
 function Login({ onLogin }) {
-  const [email, setEmail] = useState('avery.shah@cybershield.test');
-  const [password, setPassword] = useState('password');
+  const [email, setEmail] = useState(import.meta.env.DEV ? 'avery.shah@cybershield.test' : '');
+  const [password, setPassword] = useState(import.meta.env.DEV ? 'password' : '');
   const [error, setError] = useState(''); const [pending, setPending] = useState(false);
   async function submit(event) { event.preventDefault(); setPending(true); setError(''); try { onLogin(await login(email, password)); } catch (err) { setError(err.message); } finally { setPending(false); } }
   return <main className="login"><div className="login-scrim" /><section className="login-panel"><div className="brand"><ShieldCheck size={24} /><span>CyberShield</span></div><div className="login-copy"><p className="eyebrow">INCIDENT CORRELATION PLATFORM</p><h1>Investigation, connected.</h1><p>Operational intelligence for the moments that matter.</p></div><form onSubmit={submit}><label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" /></label><label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" /></label>{error && <p className="form-error">{error}</p>}<button className="primary wide" disabled={pending}>{pending ? 'Signing in…' : 'Sign in'}<ChevronRight size={17} /></button></form><p className="login-foot">Synthetic demo environment</p></section></main>;

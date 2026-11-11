@@ -1,10 +1,19 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { query } = require('../db/postgres');
+const { query, withTransaction } = require('../db/postgres');
 const { getMongoDb } = require('../db/mongo');
 const { jwtSecret } = require('../config');
-const { asyncHandler, apiError, parseId, requireFields } = require('../lib/http');
+const {
+  asyncHandler,
+  apiError,
+  parseId,
+  requireFields,
+  requireString,
+  requireEnum,
+  requireOptionalId,
+  requireDate
+} = require('../lib/http');
 const { authenticate, authorize, roles } = require('../middleware/auth');
 const { writeAudit } = require('../services/audit');
 const { getInvestigation, correlateIncident } = require('../services/correlation');
@@ -16,9 +25,18 @@ const investigators = [roles.ADMIN, roles.ANALYST, roles.RESPONDER];
 const severity = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const incidentStatus = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED'];
 const actionStatus = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+const loginLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Try again later.' }
+});
 
-router.post('/auth/login', asyncHandler(async (req, res) => {
+router.post('/auth/login', loginLimiter, asyncHandler(async (req, res) => {
   requireFields(req.body, ['email', 'password']);
+  requireString(req.body.email, 'email', 255);
+  requireString(req.body.password, 'password', 200);
   const result = await query(`SELECT u.user_id,u.name,u.email,u.password_hash,r.role_name FROM user_account u JOIN role r ON r.role_id=u.role_id WHERE lower(u.email)=lower($1)`, [req.body.email]);
   const user = result.rows[0];
   if (!user || !(await bcrypt.compare(req.body.password, user.password_hash))) throw apiError(401, 'Invalid email or password.');
@@ -74,21 +92,40 @@ router.get('/incidents/:id', authorize(...readers), asyncHandler(async (req, res
 router.get('/incidents/:id/correlation', authorize(...readers), asyncHandler(async (req, res) => res.json(await correlateIncident(parseId(req.params.id, 'incident id')))));
 router.post('/incidents', authorize(...investigators), asyncHandler(async (req, res) => {
   requireFields(req.body, ['title', 'description', 'severity', 'status', 'detected_at']);
-  if (!severity.includes(req.body.severity) || !incidentStatus.includes(req.body.status) || Number.isNaN(Date.parse(req.body.detected_at))) throw apiError(400, 'Invalid incident severity, status, or detected_at.');
-  const result = await query(`INSERT INTO incident (title,description,severity,status,detected_at,created_by,assigned_to) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [req.body.title, req.body.description, req.body.severity, req.body.status, req.body.detected_at, req.user.user_id, req.body.assigned_to || null]);
-  await writeAudit(req.user.user_id, 'incident', result.rows[0].incident_id, 'INCIDENT_CREATED_API');
+  requireString(req.body.title, 'title', 200);
+  requireString(req.body.description, 'description', 10_000);
+  requireEnum(req.body.severity, 'severity', severity);
+  requireEnum(req.body.status, 'status', incidentStatus);
+  requireDate(req.body.detected_at, 'detected_at');
+  requireOptionalId(req.body.assigned_to, 'assigned_to');
+  const result = await withTransaction(async (client) => {
+    await client.query("SELECT set_config('app.actor_user_id', $1, true)", [String(req.user.user_id)]);
+    const inserted = await client.query(`INSERT INTO incident (title,description,severity,status,detected_at,created_by,assigned_to) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [req.body.title, req.body.description, req.body.severity, req.body.status, req.body.detected_at, req.user.user_id, req.body.assigned_to ?? null]);
+    await writeAudit(req.user.user_id, 'incident', inserted.rows[0].incident_id, 'INCIDENT_CREATED_API', {}, client.query.bind(client));
+    return inserted;
+  });
   res.status(201).json(result.rows[0]);
 }));
 router.put('/incidents/:id', authorize(...investigators), asyncHandler(async (req, res) => {
-  const id = parseId(req.params.id, 'incident id'); const allowed = ['title', 'description', 'severity', 'status', 'assigned_to'];
+  const id = parseId(req.params.id, 'incident id'); requireFields(req.body, []);
+  const allowed = ['title', 'description', 'severity', 'status', 'assigned_to'];
+  const unknownFields = Object.keys(req.body).filter((key) => !allowed.includes(key));
+  if (unknownFields.length) throw apiError(400, `Unknown incident field(s): ${unknownFields.join(', ')}.`);
   const entries = Object.entries(req.body).filter(([key]) => allowed.includes(key));
   if (!entries.length) throw apiError(400, 'No editable incident fields supplied.');
-  if (req.body.severity && !severity.includes(req.body.severity)) throw apiError(400, 'Invalid severity.');
-  if (req.body.status && !incidentStatus.includes(req.body.status)) throw apiError(400, 'Invalid status.');
+  if (Object.prototype.hasOwnProperty.call(req.body, 'title')) requireString(req.body.title, 'title', 200);
+  if (Object.prototype.hasOwnProperty.call(req.body, 'description')) requireString(req.body.description, 'description', 10_000);
+  if (Object.prototype.hasOwnProperty.call(req.body, 'severity')) requireEnum(req.body.severity, 'severity', severity);
+  if (Object.prototype.hasOwnProperty.call(req.body, 'status')) requireEnum(req.body.status, 'status', incidentStatus);
+  if (Object.prototype.hasOwnProperty.call(req.body, 'assigned_to')) requireOptionalId(req.body.assigned_to, 'assigned_to');
   const set = entries.map(([key], index) => `${key}=$${index + 2}`).join(', ');
-  const result = await query(`UPDATE incident SET ${set} WHERE incident_id=$1 RETURNING *`, [id, ...entries.map(([, value]) => value)]);
+  const result = await withTransaction(async (client) => {
+    await client.query("SELECT set_config('app.actor_user_id', $1, true)", [String(req.user.user_id)]);
+    const updated = await client.query(`UPDATE incident SET ${set} WHERE incident_id=$1 RETURNING *`, [id, ...entries.map(([, value]) => value)]);
+    if (updated.rowCount) await writeAudit(req.user.user_id, 'incident', id, 'INCIDENT_UPDATED_API', Object.fromEntries(entries), client.query.bind(client));
+    return updated;
+  });
   if (!result.rowCount) throw apiError(404, 'Incident not found.');
-  await writeAudit(req.user.user_id, 'incident', id, 'INCIDENT_UPDATED_API', Object.fromEntries(entries));
   res.json(result.rows[0]);
 }));
 router.get('/incidents/:id/responses', authorize(...readers), asyncHandler(async (req, res) => {
@@ -98,7 +135,10 @@ router.get('/incidents/:id/responses', authorize(...readers), asyncHandler(async
 }));
 router.post('/incidents/:id/responses', authorize(...investigators), asyncHandler(async (req, res) => {
   const id = parseId(req.params.id, 'incident id'); requireFields(req.body, ['action_type', 'description', 'status']);
-  if (!actionStatus.includes(req.body.status)) throw apiError(400, 'Invalid response status.');
+  requireString(req.body.action_type, 'action_type', 100);
+  requireString(req.body.description, 'description', 10_000);
+  requireEnum(req.body.status, 'status', actionStatus);
+  if (req.body.performed_at !== undefined && req.body.performed_at !== null) requireDate(req.body.performed_at, 'performed_at');
   const result = await query(`INSERT INTO response_action (incident_id,responder_id,action_type,description,status,performed_at) VALUES ($1,$2,$3,$4,$5,COALESCE($6,CURRENT_TIMESTAMP)) RETURNING *`, [id, req.user.user_id, req.body.action_type, req.body.description, req.body.status, req.body.performed_at || null]);
   await writeAudit(req.user.user_id, 'response_action', result.rows[0].action_id, 'RESPONSE_ACTION_CREATED');
   res.status(201).json(result.rows[0]);

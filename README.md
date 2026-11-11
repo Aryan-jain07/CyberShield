@@ -91,3 +91,9 @@ VITE_API_URL=https://your-backend.onrender.com/api
 `VITE_API_URL` contains only the public API URL. Never put database credentials, `JWT_SECRET`, or `MONGODB_URI` in a `VITE_` variable because Vite exposes those variables to browser code.
 
 The backend accepts the configured Vercel origin plus the two local development origins. Do not set `FRONTEND_URL=*`; wildcard origins are rejected because the API uses credentialed CORS.
+
+## Production security
+
+The production login screen does not prefill demo credentials. Local Vite development keeps the synthetic demo values for the existing demonstration workflow; the seed scripts are manual and are not run by the Render build or start commands.
+
+The backend applies login-only rate limiting, Helmet security headers without an API CSP, request validation for incident and response writes, and a `/ready` endpoint that checks PostgreSQL and MongoDB. Run `npm run test:security` from `backend` against the configured databases to verify these behaviors.

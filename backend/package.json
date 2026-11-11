@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test:integration": "node scripts/verify-api.js",
+    "test:security": "node scripts/verify-security.js",
     "db:reset-demo-passwords": "node scripts/reset-demo-passwords.js",
     "mongo:seed": "set NODE_PATH=%CD%\\node_modules&& node ../mongodb/seed.js",
     "mongo:verify": "set NODE_PATH=%CD%\\node_modules&& node ../mongodb/verify.js"
@@ -16,6 +17,8 @@
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.7.4",
+    "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.18.0",
     "pg": "^8.16.3"
