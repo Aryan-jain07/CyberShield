@@ -34,6 +34,37 @@ const incidentSorts = {
   title_asc: 'i.title ASC, i.incident_id ASC',
   title_desc: 'i.title DESC, i.incident_id DESC'
 };
+const assetSorts = {
+  newest: 'a.asset_id DESC',
+  oldest: 'a.asset_id ASC',
+  name_asc: 'a.hostname ASC, a.asset_id ASC',
+  name_desc: 'a.hostname DESC, a.asset_id DESC',
+  criticality_desc: `CASE a.criticality WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 END DESC, a.asset_id DESC`,
+  criticality_asc: `CASE a.criticality WHEN 'LOW' THEN 1 WHEN 'MEDIUM' THEN 2 WHEN 'HIGH' THEN 3 WHEN 'CRITICAL' THEN 4 END ASC, a.asset_id DESC`,
+  vulnerabilities_desc: 'COUNT(DISTINCT sv.vuln_id) DESC, a.asset_id DESC',
+  vulnerabilities_asc: 'COUNT(DISTINCT sv.vuln_id) ASC, a.asset_id DESC'
+};
+const vulnerabilitySorts = {
+  newest: 'v.vuln_id DESC',
+  oldest: 'v.vuln_id ASC',
+  cvss_desc: 'v.cvss_score DESC, v.vuln_id DESC',
+  cvss_asc: 'v.cvss_score ASC, v.vuln_id DESC',
+  severity_desc: 'v.cvss_score DESC, v.vuln_id DESC',
+  severity_asc: 'v.cvss_score ASC, v.vuln_id DESC',
+  cve_asc: 'v.cve_id ASC, v.vuln_id ASC',
+  cve_desc: 'v.cve_id DESC, v.vuln_id DESC'
+};
+const auditSorts = {
+  newest: 'al.timestamp DESC, al.audit_id DESC',
+  oldest: 'al.timestamp ASC, al.audit_id ASC',
+  user_asc: "COALESCE(u.name, 'System') ASC, al.audit_id ASC",
+  user_desc: "COALESCE(u.name, 'System') DESC, al.audit_id DESC",
+  action_asc: 'al.action ASC, al.audit_id ASC',
+  action_desc: 'al.action DESC, al.audit_id DESC',
+  entity_asc: 'al.entity_name ASC, al.audit_id ASC',
+  entity_desc: 'al.entity_name DESC, al.audit_id DESC'
+};
+const cvssSeverity = { LOW: [0, 3.9], MEDIUM: [4, 6.9], HIGH: [7, 8.9], CRITICAL: [9, 10] };
 const actionStatus = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 const incidentCategories = ['Malware', 'Phishing', 'Ransomware', 'Unauthorized Access', 'Data Breach', 'Denial of Service', 'Suspicious Network Activity', 'Insider Threat', 'Other'];
 const loginLimiter = require('express-rate-limit')({
@@ -76,8 +107,20 @@ router.get('/users', authorize(...readers), asyncHandler(async (_req, res) => {
   res.json(result.rows);
 }));
 
-router.get('/assets', authorize(...readers), asyncHandler(async (_req, res) => {
-  const result = await query(`SELECT a.*,u.name AS owner_name,COUNT(DISTINCT aws.software_id) AS software_count,COUNT(DISTINCT sv.vuln_id) AS vulnerability_count FROM asset a LEFT JOIN user_account u ON u.user_id=a.owner_user_id LEFT JOIN asset_software aws ON aws.asset_id=a.asset_id LEFT JOIN software_vuln sv ON sv.software_id=aws.software_id GROUP BY a.asset_id,u.name ORDER BY a.hostname`);
+router.get('/assets', authorize(...readers), asyncHandler(async (req, res) => {
+  const values = []; const filters = [];
+  if (req.query.asset_type) { requireString(req.query.asset_type, 'asset_type', 50); values.push(req.query.asset_type); filters.push(`a.asset_type=$${values.length}`); }
+  if (req.query.criticality) { if (!severity.includes(req.query.criticality)) throw apiError(400, 'Invalid criticality filter.'); values.push(req.query.criticality); filters.push(`a.criticality=$${values.length}`); }
+  if (req.query.status) { if (!['ACTIVE', 'INACTIVE', 'RETIRED', 'QUARANTINED'].includes(req.query.status)) throw apiError(400, 'Invalid asset status filter.'); values.push(req.query.status); filters.push(`a.status=$${values.length}`); }
+  if (req.query.owner_user_id) {
+    if (req.query.owner_user_id === 'unassigned') filters.push('a.owner_user_id IS NULL');
+    else { const ownerId = parseId(req.query.owner_user_id, 'owner_user_id'); values.push(ownerId); filters.push(`a.owner_user_id=$${values.length}`); }
+  }
+  if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(a.hostname ILIKE $${values.length} OR a.ip_address::TEXT ILIKE $${values.length} OR a.asset_type ILIKE $${values.length})`); }
+  const sort = req.query.sort || 'newest';
+  if (!Object.prototype.hasOwnProperty.call(assetSorts, sort)) throw apiError(400, 'Invalid asset sort.');
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const result = await query(`SELECT a.*,u.name AS owner_name,COUNT(DISTINCT aws.software_id) AS software_count,COUNT(DISTINCT sv.vuln_id) AS vulnerability_count FROM asset a LEFT JOIN user_account u ON u.user_id=a.owner_user_id LEFT JOIN asset_software aws ON aws.asset_id=a.asset_id LEFT JOIN software_vuln sv ON sv.software_id=aws.software_id ${where} GROUP BY a.asset_id,u.name ORDER BY ${assetSorts[sort]}`, values);
   res.json(result.rows);
 }));
 router.get('/assets/:id', authorize(...readers), asyncHandler(async (req, res) => {
@@ -92,8 +135,20 @@ router.get('/software', authorize(...readers), asyncHandler(async (_req, res) =>
   const result = await query(`SELECT s.*,COUNT(DISTINCT aws.asset_id) AS asset_count,COUNT(DISTINCT sv.vuln_id) AS vulnerability_count FROM software s LEFT JOIN asset_software aws ON aws.software_id=s.software_id LEFT JOIN software_vuln sv ON sv.software_id=s.software_id GROUP BY s.software_id ORDER BY s.name,s.version`);
   res.json(result.rows);
 }));
-router.get('/vulnerabilities', authorize(...readers), asyncHandler(async (_req, res) => {
-  const result = await query(`SELECT v.*,COUNT(DISTINCT sv.software_id) AS software_count FROM vulnerability v LEFT JOIN software_vuln sv ON sv.vuln_id=v.vuln_id GROUP BY v.vuln_id ORDER BY v.cvss_score DESC,v.cve_id`);
+router.get('/vulnerabilities', authorize(...readers), asyncHandler(async (req, res) => {
+  const values = []; const filters = [];
+  if (req.query.severity) {
+    if (!Object.prototype.hasOwnProperty.call(cvssSeverity, req.query.severity)) throw apiError(400, 'Invalid vulnerability severity filter.');
+    const [min, max] = cvssSeverity[req.query.severity]; values.push(min, max); filters.push(`v.cvss_score BETWEEN $${values.length - 1} AND $${values.length}`);
+  }
+  if (req.query.status) { if (!['OPEN', 'PATCHED', 'ACCEPTED_RISK', 'MITIGATED'].includes(req.query.status)) throw apiError(400, 'Invalid vulnerability status filter.'); values.push(req.query.status); filters.push(`v.status=$${values.length}`); }
+  if (req.query.software_id) { const softwareId = parseId(req.query.software_id, 'software_id'); values.push(softwareId); filters.push(`EXISTS (SELECT 1 FROM software_vuln filter_sv WHERE filter_sv.vuln_id=v.vuln_id AND filter_sv.software_id=$${values.length})`); }
+  if (req.query.asset_id) { const assetId = parseId(req.query.asset_id, 'asset_id'); values.push(assetId); filters.push(`EXISTS (SELECT 1 FROM software_vuln filter_sv JOIN asset_software filter_as ON filter_as.software_id=filter_sv.software_id WHERE filter_sv.vuln_id=v.vuln_id AND filter_as.asset_id=$${values.length})`); }
+  if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(v.cve_id ILIKE $${values.length} OR v.description ILIKE $${values.length} OR EXISTS (SELECT 1 FROM software_vuln search_sv JOIN software search_s ON search_s.software_id=search_sv.software_id WHERE search_sv.vuln_id=v.vuln_id AND search_s.name ILIKE $${values.length}))`); }
+  const sort = req.query.sort || 'newest';
+  if (!Object.prototype.hasOwnProperty.call(vulnerabilitySorts, sort)) throw apiError(400, 'Invalid vulnerability sort.');
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const result = await query(`SELECT v.*,COUNT(DISTINCT sv.software_id) AS software_count FROM vulnerability v LEFT JOIN software_vuln sv ON sv.vuln_id=v.vuln_id ${where} GROUP BY v.vuln_id ORDER BY ${vulnerabilitySorts[sort]}`, values);
   res.json(result.rows);
 }));
 
@@ -111,7 +166,7 @@ router.get('/incidents', authorize(...readers), asyncHandler(async (req, res) =>
   if (req.query.start_date) { requireDate(req.query.start_date, 'start_date'); values.push(req.query.start_date); filters.push(`i.detected_at >= $${values.length}::date`); }
   if (req.query.end_date) { requireDate(req.query.end_date, 'end_date'); values.push(req.query.end_date); filters.push(`i.detected_at < ($${values.length}::date + INTERVAL '1 day')`); }
   if (req.query.start_date && req.query.end_date && new Date(req.query.start_date) > new Date(req.query.end_date)) throw apiError(400, 'start_date must be before or equal to end_date.');
-  if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(i.title ILIKE $${values.length} OR i.description ILIKE $${values.length})`); }
+  if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(i.title ILIKE $${values.length} OR i.description ILIKE $${values.length} OR CAST(i.incident_id AS TEXT) ILIKE $${values.length} OR EXISTS (SELECT 1 FROM incident_asset search_ia JOIN asset search_a ON search_a.asset_id=search_ia.asset_id WHERE search_ia.incident_id=i.incident_id AND (search_a.hostname ILIKE $${values.length} OR search_a.ip_address::TEXT ILIKE $${values.length})))`); }
   const sort = req.query.sort || 'newest';
   if (!Object.prototype.hasOwnProperty.call(incidentSorts, sort)) throw apiError(400, 'Invalid incident sort.');
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
@@ -248,8 +303,19 @@ router.get('/analytics/overview', authorize(...readers), asyncHandler(async (_re
   res.json({ ...totals.rows[0], incidents_by_severity: severityData.rows, incidents_by_status: statusData.rows, most_affected_assets: assets.rows, common_techniques: techniques.rows });
 }));
 router.get('/audit-logs', authorize(roles.ADMIN, roles.RESEARCHER), asyncHandler(async (req, res) => {
-  const limit = Math.min(Number(req.query.limit || 100), 500); if (!Number.isInteger(limit) || limit < 1) throw apiError(400, 'limit must be a positive integer.');
-  const result = await query('SELECT al.*,u.name AS user_name FROM audit_log al LEFT JOIN user_account u ON u.user_id=al.user_id ORDER BY al.timestamp DESC LIMIT $1', [limit]); res.json(result.rows);
+  const values = []; const filters = [];
+  if (req.query.user_id) { const userId = parseId(req.query.user_id, 'user_id'); values.push(userId); filters.push(`al.user_id=$${values.length}`); }
+  if (req.query.action) { requireString(req.query.action, 'action', 80); values.push(req.query.action); filters.push(`al.action=$${values.length}`); }
+  if (req.query.entity_name) { requireString(req.query.entity_name, 'entity_name', 80); values.push(req.query.entity_name); filters.push(`al.entity_name=$${values.length}`); }
+  if (req.query.start_date) { requireDate(req.query.start_date, 'start_date'); values.push(req.query.start_date); filters.push(`al.timestamp >= $${values.length}::date`); }
+  if (req.query.end_date) { requireDate(req.query.end_date, 'end_date'); values.push(req.query.end_date); filters.push(`al.timestamp < ($${values.length}::date + INTERVAL '1 day')`); }
+  if (req.query.start_date && req.query.end_date && new Date(req.query.start_date) > new Date(req.query.end_date)) throw apiError(400, 'start_date must be before or equal to end_date.');
+  if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(COALESCE(u.name, 'System') ILIKE $${values.length} OR al.action ILIKE $${values.length} OR al.entity_name ILIKE $${values.length} OR al.details::TEXT ILIKE $${values.length})`); }
+  const sort = req.query.sort || 'newest';
+  if (!Object.prototype.hasOwnProperty.call(auditSorts, sort)) throw apiError(400, 'Invalid audit log sort.');
+  const limit = Math.min(Number(req.query.limit || 500), 500); if (!Number.isInteger(limit) || limit < 1) throw apiError(400, 'limit must be a positive integer.');
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const result = await query(`SELECT al.*,u.name AS user_name FROM audit_log al LEFT JOIN user_account u ON u.user_id=al.user_id ${where} ORDER BY ${auditSorts[sort]} LIMIT $${values.length + 1}`, [...values, limit]); res.json(result.rows);
 }));
 
 module.exports = router;
