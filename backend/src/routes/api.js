@@ -25,6 +25,15 @@ const readers = [roles.ADMIN, roles.ANALYST, roles.RESPONDER, roles.RESEARCHER, 
 const investigators = [roles.ADMIN, roles.ANALYST, roles.RESPONDER];
 const severity = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const incidentStatus = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED'];
+const incidentFilterStatus = ['PENDING_REVIEW', ...incidentStatus];
+const incidentSorts = {
+  newest: 'i.detected_at DESC, i.incident_id DESC',
+  oldest: 'i.detected_at ASC, i.incident_id ASC',
+  severity_desc: `CASE i.severity WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 END DESC, i.detected_at DESC, i.incident_id DESC`,
+  severity_asc: `CASE i.severity WHEN 'LOW' THEN 1 WHEN 'MEDIUM' THEN 2 WHEN 'HIGH' THEN 3 WHEN 'CRITICAL' THEN 4 END ASC, i.detected_at DESC, i.incident_id DESC`,
+  title_asc: 'i.title ASC, i.incident_id ASC',
+  title_desc: 'i.title DESC, i.incident_id DESC'
+};
 const actionStatus = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 const incidentCategories = ['Malware', 'Phishing', 'Ransomware', 'Unauthorized Access', 'Data Breach', 'Denial of Service', 'Suspicious Network Activity', 'Insider Threat', 'Other'];
 const loginLimiter = require('express-rate-limit')({
@@ -91,10 +100,22 @@ router.get('/vulnerabilities', authorize(...readers), asyncHandler(async (_req, 
 router.get('/incidents', authorize(...readers), asyncHandler(async (req, res) => {
   const values = []; const filters = [];
   if (req.query.severity) { if (!severity.includes(req.query.severity)) throw apiError(400, 'Invalid severity filter.'); values.push(req.query.severity); filters.push(`i.severity=$${values.length}`); }
-  if (req.query.status) { if (!incidentStatus.includes(req.query.status)) throw apiError(400, 'Invalid status filter.'); values.push(req.query.status); filters.push(`i.status=$${values.length}`); }
+  if (req.query.status) { if (!incidentFilterStatus.includes(req.query.status)) throw apiError(400, 'Invalid status filter.'); values.push(req.query.status); filters.push(`i.status=$${values.length}`); }
+  if (req.query.assigned_to) {
+    if (req.query.assigned_to === 'unassigned') filters.push('i.assigned_to_name IS NULL');
+    else {
+      const assignedTo = parseId(req.query.assigned_to, 'assigned_to');
+      values.push(assignedTo); filters.push(`i.assigned_to_name = (SELECT u.name FROM user_account u WHERE u.user_id=$${values.length})`);
+    }
+  }
+  if (req.query.start_date) { requireDate(req.query.start_date, 'start_date'); values.push(req.query.start_date); filters.push(`i.detected_at >= $${values.length}::date`); }
+  if (req.query.end_date) { requireDate(req.query.end_date, 'end_date'); values.push(req.query.end_date); filters.push(`i.detected_at < ($${values.length}::date + INTERVAL '1 day')`); }
+  if (req.query.start_date && req.query.end_date && new Date(req.query.start_date) > new Date(req.query.end_date)) throw apiError(400, 'start_date must be before or equal to end_date.');
   if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(i.title ILIKE $${values.length} OR i.description ILIKE $${values.length})`); }
+  const sort = req.query.sort || 'newest';
+  if (!Object.prototype.hasOwnProperty.call(incidentSorts, sort)) throw apiError(400, 'Invalid incident sort.');
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const result = await query(`SELECT * FROM vw_incident_summary i ${where} ORDER BY i.detected_at DESC`, values);
+  const result = await query(`SELECT * FROM vw_incident_summary i ${where} ORDER BY ${incidentSorts[sort]}`, values);
   res.json(result.rows);
 }));
 router.get('/incidents/:id', authorize(...readers), asyncHandler(async (req, res) => res.json(await getInvestigation(parseId(req.params.id, 'incident id')))));
