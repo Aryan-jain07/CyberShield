@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const net = require('node:net');
 const { query, withTransaction } = require('../db/postgres');
 const { getMongoDb } = require('../db/mongo');
 const { jwtSecret } = require('../config');
@@ -25,12 +26,20 @@ const investigators = [roles.ADMIN, roles.ANALYST, roles.RESPONDER];
 const severity = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const incidentStatus = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED'];
 const actionStatus = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+const incidentCategories = ['Malware', 'Phishing', 'Ransomware', 'Unauthorized Access', 'Data Breach', 'Denial of Service', 'Suspicious Network Activity', 'Insider Threat', 'Other'];
 const loginLimiter = require('express-rate-limit')({
   windowMs: 15 * 60 * 1000,
   limit: 10,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Try again later.' }
+});
+const incidentReportLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many incident reports. Try again later.' }
 });
 
 router.post('/auth/login', loginLimiter, asyncHandler(async (req, res) => {
@@ -90,17 +99,72 @@ router.get('/incidents', authorize(...readers), asyncHandler(async (req, res) =>
 }));
 router.get('/incidents/:id', authorize(...readers), asyncHandler(async (req, res) => res.json(await getInvestigation(parseId(req.params.id, 'incident id')))));
 router.get('/incidents/:id/correlation', authorize(...readers), asyncHandler(async (req, res) => res.json(await correlateIncident(parseId(req.params.id, 'incident id')))));
-router.post('/incidents', authorize(...investigators), asyncHandler(async (req, res) => {
-  requireFields(req.body, ['title', 'description', 'severity', 'status', 'detected_at']);
+router.post('/incidents', incidentReportLimiter, authorize(...readers), asyncHandler(async (req, res) => {
+  requireFields(req.body, ['title', 'description', 'severity', 'detected_at']);
+  const reportingOnly = !investigators.includes(req.user.role_name);
+  const allowed = ['title', 'category', 'description', 'severity', 'detected_at', 'source', 'additional_notes', 'asset_id', 'indicators', 'status', 'assigned_to'];
+  const unknownFields = Object.keys(req.body).filter((key) => !allowed.includes(key));
+  if (unknownFields.length) throw apiError(400, `Unknown incident field(s): ${unknownFields.join(', ')}.`);
+  if (reportingOnly && (Object.prototype.hasOwnProperty.call(req.body, 'status') || Object.prototype.hasOwnProperty.call(req.body, 'assigned_to'))) {
+    throw apiError(403, 'Reporting users cannot set incident status or assignment.');
+  }
   requireString(req.body.title, 'title', 200);
   requireString(req.body.description, 'description', 10_000);
+  requireEnum(req.body.category || 'Other', 'category', incidentCategories);
   requireEnum(req.body.severity, 'severity', severity);
-  requireEnum(req.body.status, 'status', incidentStatus);
+  if (req.body.source !== undefined && req.body.source !== null) requireString(req.body.source, 'source', 120);
+  if (req.body.additional_notes !== undefined && req.body.additional_notes !== null) requireString(req.body.additional_notes, 'additional_notes', 10_000, 0);
   requireDate(req.body.detected_at, 'detected_at');
-  requireOptionalId(req.body.assigned_to, 'assigned_to');
+  requireOptionalId(req.body.asset_id, 'asset_id');
+  if (req.body.indicators !== undefined && (!Array.isArray(req.body.indicators) || req.body.indicators.length > 50)) {
+    throw apiError(400, 'indicators must be an array containing no more than 50 values.');
+  }
+  const indicators = (req.body.indicators || []).map((value) => {
+    requireString(value, 'indicator', 500);
+    if (net.isIP(value) || /^https?:\/\/\S+$/i.test(value)) return { value, type: net.isIP(value) ? 'IP' : 'URL' };
+    if (/^[a-f0-9]{32,128}$/i.test(value)) return { value, type: 'HASH' };
+    if (/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(value)) return { value, type: 'DOMAIN' };
+    throw apiError(400, `Invalid indicator: ${value}.`);
+  });
+  if (!reportingOnly) {
+    requireEnum(req.body.status || 'OPEN', 'status', incidentStatus);
+    requireOptionalId(req.body.assigned_to, 'assigned_to');
+  }
   const result = await withTransaction(async (client) => {
     await client.query("SELECT set_config('app.actor_user_id', $1, true)", [String(req.user.user_id)]);
-    const inserted = await client.query(`INSERT INTO incident (title,description,severity,status,detected_at,created_by,assigned_to) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [req.body.title, req.body.description, req.body.severity, req.body.status, req.body.detected_at, req.user.user_id, req.body.assigned_to ?? null]);
+    if (req.body.asset_id !== undefined && req.body.asset_id !== null) {
+      const asset = await client.query('SELECT asset_id FROM asset WHERE asset_id = $1', [req.body.asset_id]);
+      if (!asset.rowCount) throw apiError(400, 'Affected asset not found.');
+    }
+    if (!reportingOnly && req.body.assigned_to !== undefined && req.body.assigned_to !== null) {
+      const assignee = await client.query('SELECT user_id FROM user_account WHERE user_id = $1', [req.body.assigned_to]);
+      if (!assignee.rowCount) throw apiError(400, 'Assigned user not found.');
+    }
+    const inserted = await client.query(
+      `INSERT INTO incident (title,category,description,severity,status,detected_at,created_by,assigned_to,source,additional_notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [req.body.title, req.body.category || 'Other', req.body.description, req.body.severity, reportingOnly ? 'OPEN' : (req.body.status || 'OPEN'), req.body.detected_at, req.user.user_id, reportingOnly ? null : (req.body.assigned_to ?? null), req.body.source ?? null, req.body.additional_notes ?? null]
+    );
+    if (req.body.asset_id !== undefined && req.body.asset_id !== null) {
+      await client.query(
+        'INSERT INTO incident_asset (incident_id, asset_id, impact_type, affected_at) VALUES ($1, $2, $3, $4)',
+        [inserted.rows[0].incident_id, req.body.asset_id, 'REPORTED_AFFECTED_ASSET', req.body.detected_at]
+      );
+    }
+    for (const indicator of indicators) {
+      const saved = await client.query(
+        `INSERT INTO indicator (type, value, confidence, first_seen, last_seen)
+         VALUES ($1, $2, 50, $3, $3)
+         ON CONFLICT (type, value) DO UPDATE SET last_seen = GREATEST(indicator.last_seen, EXCLUDED.last_seen)
+         RETURNING indicator_id`,
+        [indicator.type, indicator.value, req.body.detected_at]
+      );
+      await client.query(
+        `INSERT INTO incident_indicator (incident_id, indicator_id, observed_at, observation_context)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [inserted.rows[0].incident_id, saved.rows[0].indicator_id, req.body.detected_at, 'Reported during incident submission.']
+      );
+    }
     await writeAudit(req.user.user_id, 'incident', inserted.rows[0].incident_id, 'INCIDENT_CREATED_API', {}, client.query.bind(client));
     return inserted;
   });
@@ -108,12 +172,13 @@ router.post('/incidents', authorize(...investigators), asyncHandler(async (req, 
 }));
 router.put('/incidents/:id', authorize(...investigators), asyncHandler(async (req, res) => {
   const id = parseId(req.params.id, 'incident id'); requireFields(req.body, []);
-  const allowed = ['title', 'description', 'severity', 'status', 'assigned_to'];
+  const allowed = ['title', 'category', 'description', 'severity', 'status', 'assigned_to'];
   const unknownFields = Object.keys(req.body).filter((key) => !allowed.includes(key));
   if (unknownFields.length) throw apiError(400, `Unknown incident field(s): ${unknownFields.join(', ')}.`);
   const entries = Object.entries(req.body).filter(([key]) => allowed.includes(key));
   if (!entries.length) throw apiError(400, 'No editable incident fields supplied.');
   if (Object.prototype.hasOwnProperty.call(req.body, 'title')) requireString(req.body.title, 'title', 200);
+  if (Object.prototype.hasOwnProperty.call(req.body, 'category')) requireEnum(req.body.category, 'category', incidentCategories);
   if (Object.prototype.hasOwnProperty.call(req.body, 'description')) requireString(req.body.description, 'description', 10_000);
   if (Object.prototype.hasOwnProperty.call(req.body, 'severity')) requireEnum(req.body.severity, 'severity', severity);
   if (Object.prototype.hasOwnProperty.call(req.body, 'status')) requireEnum(req.body.status, 'status', incidentStatus);

@@ -8,6 +8,7 @@
     "dev": "node --watch src/server.js",
     "test:integration": "node scripts/verify-api.js",
     "test:security": "node scripts/verify-security.js",
+    "test:incident-reporting": "node scripts/verify-incident-reporting.js",
     "db:reset-demo-passwords": "node scripts/reset-demo-passwords.js",
     "mongo:seed": "set NODE_PATH=%CD%\\node_modules&& node ../mongodb/seed.js",
     "mongo:verify": "set NODE_PATH=%CD%\\node_modules&& node ../mongodb/verify.js"

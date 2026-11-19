@@ -73,13 +73,13 @@ async function main() {
     const auth = headers('198.51.100.11', { Authorization: `Bearer ${adminLogin.body.token}` });
 
     const roleAccounts = [
-      ['avery.shah@cybershield.test', 'Admin', true, true],
-      ['riya.mehta@cybershield.test', 'Security Analyst', true, false],
-      ['karan.iyer@cybershield.test', 'Incident Responder', true, false],
-      ['nina.roy@cybershield.test', 'Threat Researcher', false, true],
-      ['dev.patel@cybershield.test', 'Viewer', false, false]
+      ['avery.shah@cybershield.test', 'Admin', true],
+      ['riya.mehta@cybershield.test', 'Security Analyst', false],
+      ['karan.iyer@cybershield.test', 'Incident Responder', false],
+      ['nina.roy@cybershield.test', 'Threat Researcher', true],
+      ['dev.patel@cybershield.test', 'Viewer', false]
     ];
-    for (const [index, [email, role, canWrite, canReadAudit]] of roleAccounts.entries()) {
+    for (const [index, [email, role, canReadAudit]] of roleAccounts.entries()) {
       const session = await jsonRequest(baseUrl, '/api/auth/login', {
         method: 'POST',
         headers: headers(`198.51.100.${20 + index}`),
@@ -94,7 +94,7 @@ async function main() {
         headers: roleAuth,
         body: JSON.stringify({})
       });
-      if (write.response.status !== (canWrite ? 400 : 403)) throw new Error(`${role} write authorization returned ${write.response.status}.`);
+      if (write.response.status !== 400) throw new Error(`${role} incident reporting validation returned ${write.response.status}.`);
       const audit = await jsonRequest(baseUrl, '/api/audit-logs?limit=1', { headers: roleAuth });
       if (audit.response.status !== (canReadAudit ? 200 : 403)) throw new Error(`${role} audit authorization returned ${audit.response.status}.`);
     }

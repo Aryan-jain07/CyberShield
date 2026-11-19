@@ -21,9 +21,11 @@ Run `npm install` and `npm start` from `backend`. The API listens at `http://loc
 
 Implemented authenticated resources: `GET /api/users`, `GET /api/assets`, `GET /api/assets/:id`, `GET /api/software`, `GET /api/vulnerabilities`, `GET/POST /api/incidents`, `GET/PUT /api/incidents/:id`, `GET /api/incidents/:id/correlation`, `GET/POST /api/incidents/:id/responses`, `GET /api/indicators`, `GET /api/threat-intelligence/:indicator`, `GET /api/analytics/overview`, and `GET /api/audit-logs`.
 
+Authenticated users can report incidents with `POST /api/incidents` using a title, category, severity, description, and `detected_at`. Reports may include an affected asset, source, indicators, and investigation notes. New reports are always created as `OPEN` and attributed to the JWT user; only the existing Admin, Security Analyst, and Incident Responder roles can assign incidents or update their lifecycle.
+
 All roles can read operational data. Admins, Security Analysts, and Incident Responders can create/update incidents and record response actions. Audit logs are restricted to Admins and Threat Researchers. The correlation endpoint combines PostgreSQL investigation data with MongoDB matches and evaluates repeated indicators, critical vulnerabilities, threat-intelligence matches, recurring assets, response gaps, and related incidents.
 
-Run `npm run test:integration` from `backend` to test every endpoint against the live databases, including bcrypt login, RBAC rejection, MongoDB intelligence lookup, write paths, and all correlation rules.
+Run `npm run test:integration` and `npm run test:incident-reporting` from `backend` to test every endpoint against the live databases, including bcrypt login, RBAC rejection, MongoDB intelligence lookup, incident reporting, write paths, and all correlation rules.
 
 ## Phase 3: web preview
 

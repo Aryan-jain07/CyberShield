@@ -9,7 +9,10 @@ SELECT
     assignee.name AS assigned_to_name,
     COUNT(DISTINCT ia.asset_id) AS affected_asset_count,
     COUNT(DISTINCT ii.indicator_id) AS indicator_count,
-    COUNT(DISTINCT ra.action_id) AS response_action_count
+    COUNT(DISTINCT ra.action_id) AS response_action_count,
+    i.category,
+    i.source,
+    i.additional_notes
 FROM incident i
 JOIN user_account creator ON creator.user_id = i.created_by
 LEFT JOIN user_account assignee ON assignee.user_id = i.assigned_to
