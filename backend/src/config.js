@@ -68,5 +68,6 @@ module.exports = {
   port: Number(process.env.PORT || 4000),
   jwtSecret: process.env.JWT_SECRET,
   postgres,
-  mongoUri: process.env.MONGODB_URI
+  mongoUri: process.env.MONGODB_URI,
+  nvdApiKey: process.env.NVD_API_KEY || null
 };

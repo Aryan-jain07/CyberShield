@@ -11,7 +11,7 @@ PostgreSQL is the relational system of record. MongoDB holds semi-structured thr
 4. From `backend`, run `npm install`, `npm run mongo:seed`, then `npm run mongo:verify`.
 5. Run `psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database/queries.sql` to exercise DBMS demonstration queries.
 
-The relational design contains exactly 17 tables, including junction tables for the M:N relationships. `database/` contains schema, indexes, views, functions/procedure, trigger, seed, verification, and query demonstration scripts. The seeded demo incident is `incident_id = 1`, Phishing Attack Targeting Employee, tied to `LAPTOP-007`, an intentionally vulnerable browser entry, a repeated malicious indicator, the synthetic `Example Group`, and matching MongoDB intelligence.
+The relational design contains the original tables plus backward-compatible migrations. `database/` contains schema, migrations, indexes, views, functions/procedure, trigger, seed, verification, and query demonstration scripts. The seeded demo incident is `incident_id = 1`, Phishing Attack Targeting Employee, tied to `LAPTOP-007`, an intentionally vulnerable browser entry, a repeated malicious indicator, the synthetic `Example Group`, and matching MongoDB intelligence.
 
 ## Phase 2: backend API
 
@@ -53,6 +53,23 @@ The target deployment uses Vercel for the frontend, Render for the backend, Neon
 
 The Vite development proxy sends `/api` requests to `http://localhost:4000`, so no frontend environment variable is required locally.
 
+### Vulnerability intelligence synchronization
+
+Phase 1 integrates the official NVD CVE API 2.0 and CISA KEV JSON catalog. PostgreSQL stores normalized source data in `vulnerability_intelligence`, synchronization state in `vulnerability_sync_state`, run history in `vulnerability_sync_run`, and CPE/software evidence in `vulnerability_software_match`. Existing seeded vulnerability rows and software relationships are retained; matching external CVEs never rewrites seeded descriptions or statuses.
+
+Set `NVD_API_KEY` optionally in the backend environment. It is never exposed to the frontend. The migrations applied by `database/init.ps1` add source-backed NVD descriptions and normalized software correlation indexes. Existing deployments should apply `database/migrations/002_vulnerability_intelligence.sql`, `003_vulnerability_sync_progress.sql`, and `004_vulnerability_correlation.sql` once with `psql`.
+
+Only exact and probable CPE/software matches are persisted; unmatched combinations are not created by new synchronizations. The unapplied `database/migrations/005_cleanup_unmatched_matches.sql` archives and removes legacy unmatched rows only after explicit approval.
+
+All authenticated readers can view synchronization status and imported records. Only Admin users can trigger synchronization:
+
+```text
+POST /api/vulnerability-intelligence/sync
+{"source":"ALL"}
+```
+
+Use `NVD` or `CISA_KEV` for a source-specific refresh. The service uses incremental NVD `lastModStartDate` state, paginates results, retries timeouts/rate limits, refreshes the complete KEV catalog, uses a PostgreSQL advisory lock to prevent overlap, and writes synchronization audit events. A daily scheduler should invoke the protected endpoint from an external job runner; the Render web service does not start a persistent background scheduler.
+
 ### Render backend
 
 Create a Render Web Service with:
@@ -70,6 +87,7 @@ DATABASE_URL=your-Neon-connection-string
 MONGODB_URI=your-MongoDB-Atlas-connection-string
 JWT_SECRET=your-long-random-secret
 FRONTEND_URL=https://your-project.vercel.app
+NVD_API_KEY=optional-NVD-api-key
 ```
 
 Render supplies `PORT` automatically. Do not configure `POSTGRES_*` when using `DATABASE_URL`; the backend prefers `DATABASE_URL` for Neon and falls back to the local `POSTGRES_*` variables when it is absent.

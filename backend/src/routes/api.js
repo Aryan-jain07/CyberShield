@@ -19,6 +19,7 @@ const { authenticate, authorize, roles } = require('../middleware/auth');
 const { writeAudit } = require('../services/audit');
 const { getInvestigation, correlateIncident } = require('../services/correlation');
 const { analyzeIncidentText } = require('../services/nlp');
+const { syncNvd, syncKev, syncAll, getSyncStatus } = require('../services/vulnerabilitySync');
 
 const router = express.Router();
 const readers = [roles.ADMIN, roles.ANALYST, roles.RESPONDER, roles.RESEARCHER, roles.VIEWER];
@@ -144,12 +145,38 @@ router.get('/vulnerabilities', authorize(...readers), asyncHandler(async (req, r
   if (req.query.status) { if (!['OPEN', 'PATCHED', 'ACCEPTED_RISK', 'MITIGATED'].includes(req.query.status)) throw apiError(400, 'Invalid vulnerability status filter.'); values.push(req.query.status); filters.push(`v.status=$${values.length}`); }
   if (req.query.software_id) { const softwareId = parseId(req.query.software_id, 'software_id'); values.push(softwareId); filters.push(`EXISTS (SELECT 1 FROM software_vuln filter_sv WHERE filter_sv.vuln_id=v.vuln_id AND filter_sv.software_id=$${values.length})`); }
   if (req.query.asset_id) { const assetId = parseId(req.query.asset_id, 'asset_id'); values.push(assetId); filters.push(`EXISTS (SELECT 1 FROM software_vuln filter_sv JOIN asset_software filter_as ON filter_as.software_id=filter_sv.software_id WHERE filter_sv.vuln_id=v.vuln_id AND filter_as.asset_id=$${values.length})`); }
+  if (req.query.kev) { if (req.query.kev !== 'true') throw apiError(400, 'kev must be true when supplied.'); filters.push('vi.is_kev=TRUE'); }
   if (req.query.search) { values.push(`%${req.query.search}%`); filters.push(`(v.cve_id ILIKE $${values.length} OR v.description ILIKE $${values.length} OR EXISTS (SELECT 1 FROM software_vuln search_sv JOIN software search_s ON search_s.software_id=search_sv.software_id WHERE search_sv.vuln_id=v.vuln_id AND search_s.name ILIKE $${values.length}))`); }
   const sort = req.query.sort || 'newest';
   if (!Object.prototype.hasOwnProperty.call(vulnerabilitySorts, sort)) throw apiError(400, 'Invalid vulnerability sort.');
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const result = await query(`SELECT v.*,COUNT(DISTINCT sv.software_id) AS software_count FROM vulnerability v LEFT JOIN software_vuln sv ON sv.vuln_id=v.vuln_id ${where} GROUP BY v.vuln_id ORDER BY ${vulnerabilitySorts[sort]}`, values);
+  const result = await query(`SELECT v.*,vi.intelligence_id,vi.source_name,vi.source_published_at,vi.source_last_modified_at,vi.last_synced_at,vi.external_status,vi.severity AS source_severity,vi.is_kev,vi.kev_date_added,vi.kev_required_action,vi.kev_due_date,vi.kev_known_ransomware,COALESCE(software_summary.software_count,0) AS software_count FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id LEFT JOIN (SELECT vuln_id,COUNT(DISTINCT software_id) AS software_count FROM software_vuln GROUP BY vuln_id) software_summary ON software_summary.vuln_id=v.vuln_id ${where} ORDER BY ${vulnerabilitySorts[sort]}`, values);
   res.json(result.rows);
+}));
+router.get('/vulnerabilities/:id', authorize(...readers), asyncHandler(async (req, res) => {
+  const id = parseId(req.params.id, 'vulnerability id');
+  const vulnerability = await query(`SELECT v.*,vi.* FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id WHERE v.vuln_id=$1`, [id]);
+  if (!vulnerability.rowCount) throw apiError(404, 'Vulnerability not found.');
+  const [software, assets] = await Promise.all([
+    query(`SELECT s.software_id,s.name,s.vendor,s.version,vm.match_type,vm.evidence,vm.analyst_verified FROM vulnerability_software_match vm JOIN software s ON s.software_id=vm.software_id WHERE vm.intelligence_id=$1 ORDER BY s.name,s.version`, [vulnerability.rows[0].intelligence_id || 0]),
+    query(`SELECT DISTINCT a.asset_id,a.hostname,a.ip_address,a.status FROM vulnerability_software_match vm JOIN asset_software aws ON aws.software_id=vm.software_id JOIN asset a ON a.asset_id=aws.asset_id WHERE vm.intelligence_id=$1 AND vm.match_type IN ('EXACT','PROBABLE') ORDER BY a.hostname`, [vulnerability.rows[0].intelligence_id || 0])
+  ]);
+  res.json({ ...vulnerability.rows[0], affected_software: software.rows, related_assets: assets.rows });
+}));
+router.get('/vulnerability-intelligence/kev', authorize(...readers), asyncHandler(async (_req, res) => {
+  const result = await query(`SELECT v.*,vi.* FROM vulnerability v JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id WHERE vi.is_kev=TRUE ORDER BY vi.kev_date_added DESC NULLS LAST,v.cve_id`);
+  res.json(result.rows);
+}));
+router.get('/vulnerability-intelligence/status', authorize(...readers), asyncHandler(async (_req, res) => res.json(await getSyncStatus())));
+router.get('/vulnerability-intelligence/runs', authorize(...readers), asyncHandler(async (_req, res) => {
+  const result = await query('SELECT * FROM vulnerability_sync_run ORDER BY started_at DESC LIMIT 20');
+  res.json(result.rows);
+}));
+router.post('/vulnerability-intelligence/sync', authorize(roles.ADMIN), asyncHandler(async (req, res) => {
+  const source = req.body?.source || 'ALL';
+  if (!['NVD', 'CISA_KEV', 'ALL'].includes(source)) throw apiError(400, 'source must be NVD, CISA_KEV, or ALL.');
+  const result = source === 'NVD' ? await syncNvd(req.user.user_id) : source === 'CISA_KEV' ? await syncKev(req.user.user_id) : await syncAll(req.user.user_id);
+  res.status(202).json(result);
 }));
 
 router.get('/incidents', authorize(...readers), asyncHandler(async (req, res) => {

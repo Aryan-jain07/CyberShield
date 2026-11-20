@@ -35,7 +35,7 @@ if ([string]::IsNullOrWhiteSpace($DatabaseUrl)) {
     }
 }
 
-$files = @('schema.sql', 'migrations/001_incident_reporting.sql', 'indexes.sql', 'views.sql', 'functions.sql', 'triggers.sql', 'seed.sql', 'verify.sql')
+$files = @('schema.sql', 'migrations/001_incident_reporting.sql', 'migrations/002_vulnerability_intelligence.sql', 'migrations/003_vulnerability_sync_progress.sql', 'migrations/004_vulnerability_correlation.sql', 'indexes.sql', 'views.sql', 'functions.sql', 'triggers.sql', 'seed.sql', 'verify.sql')
 foreach ($file in $files) {
     & psql $DatabaseUrl -v ON_ERROR_STOP=1 -f (Join-Path $PSScriptRoot $file)
     if ($LASTEXITCODE -ne 0) { throw "PostgreSQL initialization failed while running $file" }
