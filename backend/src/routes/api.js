@@ -20,6 +20,7 @@ const { writeAudit } = require('../services/audit');
 const { getInvestigation, correlateIncident } = require('../services/correlation');
 const { analyzeIncidentText } = require('../services/nlp');
 const { syncNvd, syncKev, syncAll, getSyncStatus } = require('../services/vulnerabilitySync');
+const { normalizeVulnerabilitySeverity, serializeVulnerabilityRows, vulnerabilitySeveritySql } = require('../services/vulnerabilitySeverity');
 
 const router = express.Router();
 const readers = [roles.ADMIN, roles.ANALYST, roles.RESPONDER, roles.RESEARCHER, roles.VIEWER];
@@ -50,8 +51,8 @@ const vulnerabilitySorts = {
   oldest: 'v.vuln_id ASC',
   cvss_desc: 'v.cvss_score DESC, v.vuln_id DESC',
   cvss_asc: 'v.cvss_score ASC, v.vuln_id DESC',
-  severity_desc: 'v.cvss_score DESC, v.vuln_id DESC',
-  severity_asc: 'v.cvss_score ASC, v.vuln_id DESC',
+  severity_desc: `CASE (${vulnerabilitySeveritySql()}) WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4 WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 WHEN 'NONE' THEN 1 ELSE 0 END DESC, v.vuln_id DESC`,
+  severity_asc: `CASE (${vulnerabilitySeveritySql()}) WHEN 'UNRATED' THEN 0 WHEN 'NONE' THEN 1 WHEN 'LOW' THEN 2 WHEN 'MEDIUM' THEN 3 WHEN 'HIGH' THEN 4 WHEN 'CRITICAL' THEN 5 END ASC, v.vuln_id DESC`,
   cve_asc: 'v.cve_id ASC, v.vuln_id ASC',
   cve_desc: 'v.cve_id DESC, v.vuln_id DESC'
 };
@@ -65,7 +66,7 @@ const auditSorts = {
   entity_asc: 'al.entity_name ASC, al.audit_id ASC',
   entity_desc: 'al.entity_name DESC, al.audit_id DESC'
 };
-const cvssSeverity = { LOW: [0, 3.9], MEDIUM: [4, 6.9], HIGH: [7, 8.9], CRITICAL: [9, 10] };
+const vulnerabilitySeverities = ['NONE', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const actionStatus = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 const incidentCategories = ['Malware', 'Phishing', 'Ransomware', 'Unauthorized Access', 'Data Breach', 'Denial of Service', 'Suspicious Network Activity', 'Insider Threat', 'Other'];
 const loginLimiter = require('express-rate-limit')({
@@ -139,8 +140,8 @@ router.get('/software', authorize(...readers), asyncHandler(async (_req, res) =>
 router.get('/vulnerabilities', authorize(...readers), asyncHandler(async (req, res) => {
   const values = []; const filters = [];
   if (req.query.severity) {
-    if (!Object.prototype.hasOwnProperty.call(cvssSeverity, req.query.severity)) throw apiError(400, 'Invalid vulnerability severity filter.');
-    const [min, max] = cvssSeverity[req.query.severity]; values.push(min, max); filters.push(`v.cvss_score BETWEEN $${values.length - 1} AND $${values.length}`);
+    if (!vulnerabilitySeverities.includes(req.query.severity)) throw apiError(400, 'Invalid vulnerability severity filter.');
+    values.push(req.query.severity); filters.push(`(${vulnerabilitySeveritySql()})=$${values.length}`);
   }
   if (req.query.status) { if (!['OPEN', 'PATCHED', 'ACCEPTED_RISK', 'MITIGATED'].includes(req.query.status)) throw apiError(400, 'Invalid vulnerability status filter.'); values.push(req.query.status); filters.push(`v.status=$${values.length}`); }
   if (req.query.software_id) { const softwareId = parseId(req.query.software_id, 'software_id'); values.push(softwareId); filters.push(`EXISTS (SELECT 1 FROM software_vuln filter_sv WHERE filter_sv.vuln_id=v.vuln_id AND filter_sv.software_id=$${values.length})`); }
@@ -150,18 +151,30 @@ router.get('/vulnerabilities', authorize(...readers), asyncHandler(async (req, r
   const sort = req.query.sort || 'newest';
   if (!Object.prototype.hasOwnProperty.call(vulnerabilitySorts, sort)) throw apiError(400, 'Invalid vulnerability sort.');
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const result = await query(`SELECT v.*,vi.intelligence_id,vi.source_name,vi.source_published_at,vi.source_last_modified_at,vi.last_synced_at,vi.external_status,vi.severity AS source_severity,vi.is_kev,vi.kev_date_added,vi.kev_required_action,vi.kev_due_date,vi.kev_known_ransomware,COALESCE(software_summary.software_count,0) AS software_count FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id LEFT JOIN (SELECT vuln_id,COUNT(DISTINCT software_id) AS software_count FROM software_vuln GROUP BY vuln_id) software_summary ON software_summary.vuln_id=v.vuln_id ${where} ORDER BY ${vulnerabilitySorts[sort]}`, values);
-  res.json(result.rows);
+  const result = await query(`SELECT v.*,vi.intelligence_id,vi.source_name,vi.source_published_at,vi.source_last_modified_at,vi.last_synced_at,vi.external_status,vi.severity AS source_severity,vi.cvss_metrics,vi.is_kev,vi.kev_date_added,vi.kev_required_action,vi.kev_due_date,vi.kev_known_ransomware,COALESCE(software_summary.software_count,0) AS software_count FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id LEFT JOIN (SELECT vuln_id,COUNT(DISTINCT software_id) AS software_count FROM software_vuln GROUP BY vuln_id) software_summary ON software_summary.vuln_id=v.vuln_id ${where} ORDER BY ${vulnerabilitySorts[sort]}`, values);
+  res.json(serializeVulnerabilityRows(result.rows));
 }));
 router.get('/vulnerabilities/:id', authorize(...readers), asyncHandler(async (req, res) => {
   const id = parseId(req.params.id, 'vulnerability id');
-  const vulnerability = await query(`SELECT v.*,vi.* FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id WHERE v.vuln_id=$1`, [id]);
+  const vulnerability = await query(`SELECT v.*,vi.*,(${vulnerabilitySeveritySql()}) AS normalized_severity FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id WHERE v.vuln_id=$1`, [id]);
   if (!vulnerability.rowCount) throw apiError(404, 'Vulnerability not found.');
+  const record = vulnerability.rows[0];
+  record.cvss_metrics = Object.fromEntries(Object.entries(record.cvss_metrics || {}).map(([version, metric]) => {
+    const entry = Array.isArray(metric) ? metric[0] : metric;
+    const cvssData = entry?.cvssData || entry;
+    return [version, {
+      ...(Array.isArray(metric) ? entry : metric),
+      normalizedSeverity: normalizeVulnerabilitySeverity({
+        severity: cvssData?.baseSeverity,
+        cvssScore: cvssData?.baseScore
+      })
+    }];
+  }));
   const [software, assets] = await Promise.all([
-    query(`SELECT s.software_id,s.name,s.vendor,s.version,vm.match_type,vm.evidence,vm.analyst_verified FROM vulnerability_software_match vm JOIN software s ON s.software_id=vm.software_id WHERE vm.intelligence_id=$1 ORDER BY s.name,s.version`, [vulnerability.rows[0].intelligence_id || 0]),
-    query(`SELECT DISTINCT a.asset_id,a.hostname,a.ip_address,a.status FROM vulnerability_software_match vm JOIN asset_software aws ON aws.software_id=vm.software_id JOIN asset a ON a.asset_id=aws.asset_id WHERE vm.intelligence_id=$1 AND vm.match_type IN ('EXACT','PROBABLE') ORDER BY a.hostname`, [vulnerability.rows[0].intelligence_id || 0])
+    query(`SELECT s.software_id,s.name,s.vendor,s.version,vm.match_type,vm.evidence,vm.analyst_verified FROM vulnerability_software_match vm JOIN software s ON s.software_id=vm.software_id WHERE vm.intelligence_id=$1 ORDER BY s.name,s.version`, [record.intelligence_id || 0]),
+    query(`SELECT DISTINCT a.asset_id,a.hostname,a.ip_address,a.status FROM vulnerability_software_match vm JOIN asset_software aws ON aws.software_id=vm.software_id JOIN asset a ON a.asset_id=aws.asset_id WHERE vm.intelligence_id=$1 AND vm.match_type IN ('EXACT','PROBABLE') ORDER BY a.hostname`, [record.intelligence_id || 0])
   ]);
-  res.json({ ...vulnerability.rows[0], affected_software: software.rows, related_assets: assets.rows });
+  res.json({ ...record, affected_software: software.rows, related_assets: assets.rows });
 }));
 router.get('/vulnerability-intelligence/kev', authorize(...readers), asyncHandler(async (_req, res) => {
   const result = await query(`SELECT v.*,vi.* FROM vulnerability v JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id WHERE vi.is_kev=TRUE ORDER BY vi.kev_date_added DESC NULLS LAST,v.cve_id`);
@@ -322,7 +335,7 @@ router.get('/threat-intelligence/:indicator', authorize(...readers), asyncHandle
 
 router.get('/analytics/overview', authorize(...readers), asyncHandler(async (_req, res) => {
   const [totals, severityData, statusData, assets, techniques] = await Promise.all([
-    query(`SELECT COUNT(*) AS total_incidents,COUNT(*) FILTER (WHERE status IN ('OPEN','INVESTIGATING')) AS open_incidents,COUNT(*) FILTER (WHERE severity='CRITICAL') AS critical_incidents,(SELECT COUNT(*) FROM asset) AS total_assets,(SELECT COUNT(*) FROM vulnerability WHERE status='OPEN' AND cvss_score>=7) AS critical_vulnerabilities FROM incident`),
+    query(`SELECT COUNT(*) AS total_incidents,COUNT(*) FILTER (WHERE status IN ('OPEN','INVESTIGATING')) AS open_incidents,COUNT(*) FILTER (WHERE severity='CRITICAL') AS critical_incidents,(SELECT COUNT(*) FROM asset) AS total_assets,(SELECT COUNT(*) FROM vulnerability v LEFT JOIN vulnerability_intelligence vi ON vi.vuln_id=v.vuln_id WHERE v.status='OPEN' AND (${vulnerabilitySeveritySql()})='CRITICAL') AS critical_vulnerabilities FROM incident`),
     query('SELECT severity,COUNT(*) AS count FROM incident GROUP BY severity ORDER BY severity'), query('SELECT status,COUNT(*) AS count FROM incident GROUP BY status ORDER BY status'),
     query('SELECT a.hostname,COUNT(*) AS count FROM asset a JOIN incident_asset ia ON ia.asset_id=a.asset_id GROUP BY a.asset_id,a.hostname ORDER BY count DESC,a.hostname LIMIT 10'),
     query('SELECT t.attack_id,t.name,COUNT(*) AS count FROM technique t JOIN incident_technique it ON it.technique_id=t.technique_id GROUP BY t.technique_id,t.attack_id,t.name ORDER BY count DESC,t.attack_id LIMIT 10')
